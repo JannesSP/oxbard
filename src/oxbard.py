@@ -109,7 +109,7 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
 
 def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tuple, backBCInterval : tuple, matchRate : float, outfile : str, strand : int):
 
-    over1900 = under1900 = 0
+    # over1900 = under1900 = 0
     can_clas = set()
     mod_clas = set()
     mod_coverage = np.zeros(len(readFasta(mod_ref)['seq']), dtype=int)
@@ -140,15 +140,15 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
         # cut polyA + adapter
         # saw in unclassified_align.fa, that the mod barcode with many A, C and Us could align to the adapter(?) sequence after (3') the "poly A", within the 300 unclassified reads the AAAAA was always the "poly A" before (5') the adapter(?) sequence
         # better cut it to avoid false positives/classified reads
-        try:
-            seq = seq[:seq.index('AAAAAAAA')] # set by experience of looking at fastq sequences
-        except ValueError:
-            pass
+        # try:
+        #     seq = seq[:seq.index('AAAAAAAA')] # set by experience of looking at fastq sequences
+        # except ValueError:
+        #     pass
 
-        if len(seq) >= 1900:
-            over1900+=1
-        else:
-            under1900+=1
+        # if len(seq) >= 1900:
+        #     over1900+=1
+        # else:
+        #     under1900+=1
 
         if (i + 1) % 1000 == 0:
             print('mapping read', i + 1, end = '\r')
@@ -185,11 +185,11 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
     print(f'mapped {i + 1} reads')
 
     # print('Read Length >= 1900: ', over1900, ", < 1900: ", under1900)
-    print(f'{os.path.splitext(os.path.basename(outfile))[0]}:\tClassified: mod: {len(mod_clas - can_clas)}, can: {len(can_clas - mod_clas)}, both: {len(can_clas & mod_clas)} total: {over1900+under1900}')
+    print(f'{os.path.splitext(os.path.basename(outfile))[0]}:\tClassified: mod: {len(mod_clas - can_clas)}, can: {len(can_clas - mod_clas)}, both: {len(can_clas & mod_clas)} total: {i+1}')
     w = open(os.path.splitext(outfile)[0] + '.log', 'w')
-    w.write(f'Classified: mod: {len(mod_clas - can_clas)}, can: {len(can_clas - mod_clas)}, both: {len(can_clas & mod_clas)} total: {over1900+under1900}')
+    w.write(f'Classified: mod: {len(mod_clas - can_clas)}, can: {len(can_clas - mod_clas)}, both: {len(can_clas & mod_clas)} total: {i+1}')
     w.close()
-    with open(os.path.join(os.pardir(outfile), 'result.csv'), 'a') as a:
+    with open(os.path.join(os.path.dirname(outfile), 'result.csv'), 'a') as a:
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},mod,{len(mod_clas - can_clas)}\n')
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},can,{len(can_clas - mod_clas)}\n')
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},both,{len(can_clas & mod_clas)}\n')
