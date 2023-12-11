@@ -10,6 +10,9 @@ from Bio import SeqIO
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # Mappy cigar
 # CIGAR = {
@@ -36,7 +39,7 @@ def parse() -> Namespace:
     parser.add_argument('-f', '--frontBCInterval', metavar = '[x,y)', nargs="+", help='1-based interval for the barcode region in the 5\' end')
     parser.add_argument('-b', '--backBCInterval', metavar = '[x,y)', nargs="+", help='1-based interval for the barcode region in the 3\' end')
     parser.add_argument('--mr', metavar='FLOAT', type=float, default=0.5, help='match rate between 0.0 and 1.0')
-    parser.add_argument('--strand', default=1, choices=[-1, 1], type=int, help='Which strand to look for.')
+    parser.add_argument('--strand', default=1, choices=[-1, 1], type=int, help='Which strand to look for, forward: 1, reverse complement: -1.')
     return parser.parse_args()
 
 def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, refPos : int):
@@ -71,7 +74,7 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
         if hasMatched:
             # count matches for front barcode
             if refPos in range(*fBCInterval):
-                fBCMatches += min(refPos - fBCInterval[0], numMatched)
+                fBCMatches += min(refPos - fBCInterval[0] + 1, numMatched)
                 wasInFrontBC = True
             # add last matched bases when leaving barcode region
             elif wasInFrontBC:
@@ -81,7 +84,7 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
 
             # count matches for back barcode
             if refPos in range(*bBCInterval):
-                bBCMatches += min(refPos - bBCInterval[0], numMatched)
+                bBCMatches += min(refPos - bBCInterval[0] + 1, numMatched)
                 wasInBackBC = True
             # add last matched bases when elaving barcode region
             elif wasInBackBC:
@@ -110,6 +113,7 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
 def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tuple, backBCInterval : tuple, matchRate : float, outfile : str, strand : int):
 
     # over1900 = under1900 = 0
+    df = pd.DataFrame(columns=['readid', 'reference', 'read length', 'read quality', 'mapped ref span', 'first reference position mapped', 'last reference position mapped', 'front matches', 'back matches'])
     can_clas = set()
     mod_clas = set()
     mod_coverage = np.zeros(len(readFasta(mod_ref)['seq']), dtype=int)
@@ -136,6 +140,8 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
     w.write('readID,classification,frontClassified,backClassified,numFrontBCMatches,ratioFront,numBackBCMatches,ratioBack,mapLen,fistMappedRefPos,lastMappedRefPos\n')
     
     for i, (name, seq, qual) in enumerate(mp.fastx_read(basecalls)): # read a fasta/q sequence
+
+        qual = np.mean([ord(letter) - 33 for letter in qual])
 
         # cut polyA + adapter
         # saw in unclassified_align.fa, that the mod barcode with many A, C and Us could align to the adapter(?) sequence after (3') the "poly A", within the 300 unclassified reads the AAAAA was always the "poly A" before (5') the adapter(?) sequence
@@ -166,7 +172,20 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
             if frontClassified or backClassified:
                 mod_clas.add(name)
                 mod_coverage[mod_hit.r_st : mod_hit.r_en + 1] += 1
-           
+
+            new_entry = pd.DataFrame({
+                'readid' : [name],
+                'reference' : ['mod'],
+                'read length' : [len(seq)],
+                'read quality' : [qual],
+                'mapped ref span' : [mod_hit.r_en + 1 - mod_hit.r_st],
+                'first reference position mapped' : [mod_hit.r_st],
+                'last reference position mapped' : [mod_hit.r_en],
+                'front matches' : [fBCMatches],
+                'back matches' : [bBCMatches],
+            })
+            df = pd.concat((df, new_entry), ignore_index=True)
+
         for can_hit in can_aligner.map(seq): # traverse alignments
 
             if can_hit.strand != strand: # skip revcomp mapped reads
@@ -180,7 +199,35 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
                 can_clas.add(name)
                 can_coverage[can_hit.r_st : can_hit.r_en + 1] += 1
 
+            new_entry = pd.DataFrame({
+                'readid' : [name],
+                'reference' : ['can'],
+                'read length' : [len(seq)],
+                'read quality' : [qual],
+                'mapped ref span' : [can_hit.r_en + 1 - can_hit.r_st],
+                'first reference position mapped' : [can_hit.r_st],
+                'last reference position mapped' : [can_hit.r_en],
+                'front matches' : [fBCMatches],
+                'back matches' : [bBCMatches],
+            })
+            df = pd.concat((df, new_entry), ignore_index=True)
+
     w.close()
+
+    # dir = os.path.dirname(outfile)
+    modids = open(os.path.splitext(outfile)[0] + '_mod.ids', 'w')
+    canids = open(os.path.splitext(outfile)[0] + '_can.ids', 'w')
+    unclassified = open(os.path.splitext(outfile)[0] + '_unclassified.ids', 'w')
+
+    for i, (name, seq, qual) in enumerate(mp.fastx_read(basecalls)): # read a fasta/q sequence
+        if name in can_clas and name in mod_clas:
+            unclassified.write(name + '\n')
+        elif name in can_clas:
+            canids.write(name + '\n')
+        elif name in mod_clas:
+            modids.write(name + '\n')
+        else:
+            unclassified.write(name + '\n')
 
     print(f'mapped {i + 1} reads')
 
@@ -193,7 +240,7 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},mod,{len(mod_clas - can_clas)}\n')
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},can,{len(can_clas - mod_clas)}\n')
         a.write(f'{os.path.splitext(os.path.basename(outfile))[0]},both,{len(can_clas & mod_clas)}\n')
-    return mod_coverage, can_coverage
+    return mod_coverage, can_coverage, df
 
 def plotCoverage(mod : np.ndarray, can : np.ndarray, file : str, frontBCInterval : list, backBCInterval : list) -> None:
     if not os.path.exists(os.path.dirname(file)):
@@ -220,6 +267,7 @@ def plotCoverage(mod : np.ndarray, can : np.ndarray, file : str, frontBCInterval
     # plt.grid(True, 'both', 'both', linewidth = 0.5, c = 'grey', alpha = 0.6)
     plt.tight_layout()
     plt.savefig(file)
+    plt.close()
 
 def readFasta(fasta : str) -> dict:
     '''
@@ -253,6 +301,50 @@ def writeIds(ids : list, filepath : str) -> None:
         for id in ids:
             w.write(id + '\n')
 
+def plotRest(data : pd.DataFrame, outfilebasename : str) -> None:
+    # ['readid', 'reference', 'read length', 'read quality', 'mapped ref span', 'first reference position mapped', 'last reference position mapped', 'front matches', 'back matches']
+    sns.set_theme()
+    sns.kdeplot(data = data, x = 'read length', y = 'read quality', hue='reference', fill = True)
+    plt.savefig(outfilebasename + '_readlength_vs_quality.pdf')
+    plt.savefig(outfilebasename + '_readlength_vs_quality.svg')
+    plt.cla()
+    plt.close()
+
+    sns.set_theme()
+    sns.kdeplot(data = data, x = 'read length', y = 'mapped ref span', hue='reference', fill = True)
+    plt.savefig(outfilebasename + '_readlength_vs_maplength.pdf')
+    plt.savefig(outfilebasename + '_readlength_vs_maplength.svg')
+    plt.cla()
+    plt.close
+
+    sns.set_theme()
+    sns.kdeplot(data = data, x = 'read length', y = 'front matches', hue='reference', fill = True)
+    plt.savefig(outfilebasename + '_readlength_vs_numfrontBCmatches.pdf')
+    plt.savefig(outfilebasename + '_readlength_vs_numfrontBCmatches.svg')
+    plt.cla()
+    plt.close
+
+    sns.set_theme()
+    sns.kdeplot(data = data, x = 'read length', y = 'back matches', hue='reference', fill = True)
+    plt.savefig(outfilebasename + '_readlength_vs_numbackBCmatches.pdf')
+    plt.savefig(outfilebasename + '_readlength_vs_numbackBCmatches.svg')
+    plt.cla()
+    plt.close
+
+    sns.set_theme()
+    sns.histplot(data = data, x = 'first reference position mapped', hue='reference', log_scale=(False, True))
+    plt.savefig(outfilebasename + '_firstmappedpos.pdf')
+    plt.savefig(outfilebasename + '_firstmappedpos.svg')
+    plt.cla()
+    plt.close
+
+    sns.set_theme()
+    sns.histplot(data = data, x = 'last reference position mapped', hue='reference', log_scale=(False, True))
+    plt.savefig(outfilebasename + '_lastmappedpos.pdf')
+    plt.savefig(outfilebasename + '_lastmappedpos.svg')
+    plt.cla()
+    plt.close
+
 def main() -> None:
     args = parse()
     outfile = args.outfile
@@ -263,9 +355,10 @@ def main() -> None:
     frontBCInterval = list(map(int, args.frontBCInterval))
     backBCInterval = list(map(int, args.backBCInterval))
 
-    mod_coverage, can_coverage = mapReads(args.basecalls, args.modRef, args.canRef, frontBCInterval, backBCInterval, args.mr, outfile, args.strand)
+    mod_coverage, can_coverage, data = mapReads(args.basecalls, args.modRef, args.canRef, frontBCInterval, backBCInterval, args.mr, outfile, args.strand)
 
     plotCoverage(mod_coverage, can_coverage, os.path.splitext(outfile)[0] + '_coverage.png', frontBCInterval, backBCInterval)
+    plotRest(data, os.path.splitext(outfile)[0])
 
 if __name__ == '__main__':
     main()
