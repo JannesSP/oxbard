@@ -42,7 +42,7 @@ def parse() -> Namespace:
     parser.add_argument('--strand', default=1, choices=[-1, 1], type=int, help='Which strand to look for, forward: 1, reverse complement: -1.')
     return parser.parse_args()
 
-def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, refPos : int):
+def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, refPos : int, queryPos : int):
     '''
     Iterate over cigar string and check for barcode regions.
 
@@ -66,30 +66,41 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
 
     # init counters
     fBCMatches = bBCMatches = numMatched = 0
-    # queryPos = 0
     wasInFrontBC = wasInBackBC = hasMatched = False
+
+    queryFBarcodeArea = [None, None]
+    queryBBarcodeArea = [None, None]
 
     for cigar in cigarArray: # https://samtools.github.io/hts-specs/SAMv1.pdf
 
         if hasMatched:
             # count matches for front barcode
             if refPos in range(*fBCInterval):
+                if queryFBarcodeArea[0] is None:
+                    queryFBarcodeArea[0] = queryPos - hasMatched
+                # +1 for index correction
                 fBCMatches += min(refPos - fBCInterval[0] + 1, numMatched)
                 wasInFrontBC = True
             # add last matched bases when leaving barcode region
             elif wasInFrontBC:
                 if refPos - hasMatched in range(*fBCInterval):
                     fBCMatches += fBCInterval[1] - (refPos - numMatched)
+                if queryFBarcodeArea[1] is None:
+                    queryFBarcodeArea[1] = queryPos
                 wasInFrontBC = False
 
             # count matches for back barcode
             if refPos in range(*bBCInterval):
+                if queryBBarcodeArea[0] is None:
+                    queryBBarcodeArea[0] = queryPos - hasMatched
                 bBCMatches += min(refPos - bBCInterval[0] + 1, numMatched)
                 wasInBackBC = True
             # add last matched bases when elaving barcode region
             elif wasInBackBC:
                 if refPos - hasMatched in range(*bBCInterval):
                     bBCMatches += bBCInterval[1] - (refPos - numMatched)
+                if queryBBarcodeArea[1] is None:
+                    queryBBarcodeArea[1] = queryPos
                 wasInBackBC = False
 
         hasMatched = False
@@ -97,23 +108,23 @@ def analyseCigar(cigarArray : list, fBCInterval : tuple, bBCInterval : tuple, re
             hasMatched = cigar[1] != 8
             numMatched = cigar[0]
             refPos += cigar[0]
-            # queryPos += cigar[0]
+            queryPos += cigar[0]
         elif cigar[1] in [2, 3]: # D, N consumes ref
             refPos += cigar[0]
-        # elif cigar[1] in [1, 4]: # I, S consumes query
-            # queryPos += cigar[0]
-        elif cigar[1] in [1, 4, 5, 6]: # H, P consomes nothing
+        elif cigar[1] in [1, 4]: # I, S consumes query
+            queryPos += cigar[0]
+        elif cigar[1] in [5, 6]: # H, P consomes nothing
             continue
         else:
             print(f'ERROR! Unknown cigar character! {cigar}')
             exit(1)
 
-    return fBCMatches, bBCMatches
+    return fBCMatches, bBCMatches, queryFBarcodeArea, queryBBarcodeArea
 
 def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tuple, backBCInterval : tuple, matchRate : float, outfile : str, strand : int):
 
     # over1900 = under1900 = 0
-    df = pd.DataFrame(columns=['readid', 'reference', 'read length', 'read quality', 'mapped ref span', 'first reference position mapped', 'last reference position mapped', 'front matches', 'back matches'])
+    df = pd.DataFrame(columns=['readid', 'reference', 'read length', 'read quality', 'mapped ref span', 'first reference position mapped', 'last reference position mapped', 'front matches', 'back matches', 'queryFBarcodeStart', 'queryFBarcodeEnd', 'queryBBarcodeStart', 'queryBBarcodeEnd'])
     can_clas = set()
     mod_clas = set()
     mod_coverage = np.zeros(len(readFasta(mod_ref)['seq']), dtype=int)
@@ -146,10 +157,10 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
         # cut polyA + adapter
         # saw in unclassified_align.fa, that the mod barcode with many A, C and Us could align to the adapter(?) sequence after (3') the "poly A", within the 300 unclassified reads the AAAAA was always the "poly A" before (5') the adapter(?) sequence
         # better cut it to avoid false positives/classified reads
-        # try:
-        #     seq = seq[:seq.index('AAAAAAAA')] # set by experience of looking at fastq sequences
-        # except ValueError:
-        #     pass
+        try:
+            seq = seq[:seq.index('AAAAAA')] # set by experience of looking at fastq sequences
+        except ValueError:
+            pass
 
         # if len(seq) >= 1900:
         #     over1900+=1
@@ -165,7 +176,7 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
                 continue
 
             # check barcodes
-            fBCMatches, bBCMatches = analyseCigar(mod_hit.cigar, frontBCInterval, backBCInterval, mod_hit.r_st)
+            fBCMatches, bBCMatches, queryFBarcodeArea, queryBBarcodeArea = analyseCigar(mod_hit.cigar, frontBCInterval, backBCInterval, mod_hit.r_st, mod_hit.q_st)
             frontClassified = fBCMatches >= matchRate * (frontBCInterval[1] - frontBCInterval[0])
             backClassified = bBCMatches >= matchRate * (backBCInterval[1] - backBCInterval[0])
             w.write(f'{name},mod,{frontClassified},{backClassified},{fBCMatches},{fBCMatches/(frontBCInterval[1] - frontBCInterval[0])},{bBCMatches},{bBCMatches/(backBCInterval[1] - backBCInterval[0])},{mod_hit.r_en-mod_hit.r_st},{mod_hit.r_st},{mod_hit.r_en}\n')
@@ -183,6 +194,10 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
                 'last reference position mapped' : [mod_hit.r_en],
                 'front matches' : [fBCMatches],
                 'back matches' : [bBCMatches],
+                'queryFBarcodeStart' : [queryFBarcodeArea[0]],
+                'queryFBarcodeEnd' : [queryFBarcodeArea[1]],
+                'queryBBarcodeStart' : [queryBBarcodeArea[0]],
+                'queryBBarcodeEnd' : [queryBBarcodeArea[1]],
             })
             df = pd.concat((df, new_entry), ignore_index=True)
 
@@ -191,7 +206,7 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
             if can_hit.strand != strand: # skip revcomp mapped reads
                 continue
 
-            fBCMatches, bBCMatches = analyseCigar(can_hit.cigar, frontBCInterval, backBCInterval, can_hit.r_st)
+            fBCMatches, bBCMatches, queryFBarcodeArea, queryBBarcodeArea = analyseCigar(can_hit.cigar, frontBCInterval, backBCInterval, can_hit.r_st, can_hit.q_st)
             frontClassified = fBCMatches >= matchRate * (frontBCInterval[1] - frontBCInterval[0])
             backClassified = bBCMatches >= matchRate * (backBCInterval[1] - backBCInterval[0])
             w.write(f'{name},can,{frontClassified},{backClassified},{fBCMatches},{fBCMatches/(frontBCInterval[1] - frontBCInterval[0])},{bBCMatches},{bBCMatches/(backBCInterval[1] - backBCInterval[0])},{can_hit.r_en-can_hit.r_st},{can_hit.r_st},{can_hit.r_en}\n')
@@ -209,6 +224,10 @@ def mapReads(basecalls : str, mod_ref : str, can_ref : str, frontBCInterval : tu
                 'last reference position mapped' : [can_hit.r_en],
                 'front matches' : [fBCMatches],
                 'back matches' : [bBCMatches],
+                'queryFBarcodeStart' : [queryFBarcodeArea[0]],
+                'queryFBarcodeEnd' : [queryFBarcodeArea[1]],
+                'queryBBarcodeStart' : [queryBBarcodeArea[0]],
+                'queryBBarcodeEnd' : [queryBBarcodeArea[1]],
             })
             df = pd.concat((df, new_entry), ignore_index=True)
 
@@ -304,42 +323,39 @@ def writeIds(ids : list, filepath : str) -> None:
 def plotRest(data : pd.DataFrame, outfilebasename : str) -> None:
     # ['readid', 'reference', 'read length', 'read quality', 'mapped ref span', 'first reference position mapped', 'last reference position mapped', 'front matches', 'back matches']
     sns.set_theme()
-    sns.kdeplot(data = data, x = 'read length', y = 'read quality', hue='reference', fill = True)
+    sns.scatterplot(data = data, x = 'read length', y = 'read quality', hue='reference', alpha = 0.6)
     plt.savefig(outfilebasename + '_readlength_vs_quality.pdf')
     plt.savefig(outfilebasename + '_readlength_vs_quality.svg')
     plt.cla()
     plt.close()
 
-    sns.set_theme()
-    sns.kdeplot(data = data, x = 'read length', y = 'mapped ref span', hue='reference', fill = True)
+    sns.scatterplot(data = data, x = 'read length', y = 'mapped ref span', hue='reference', alpha = 0.6)
     plt.savefig(outfilebasename + '_readlength_vs_maplength.pdf')
     plt.savefig(outfilebasename + '_readlength_vs_maplength.svg')
     plt.cla()
     plt.close
 
-    sns.set_theme()
-    sns.kdeplot(data = data, x = 'read length', y = 'front matches', hue='reference', fill = True)
+    sns.scatterplot(data = data, x = 'read length', y = 'front matches', hue='reference', alpha = 0.6)
     plt.savefig(outfilebasename + '_readlength_vs_numfrontBCmatches.pdf')
     plt.savefig(outfilebasename + '_readlength_vs_numfrontBCmatches.svg')
     plt.cla()
     plt.close
 
-    sns.set_theme()
-    sns.kdeplot(data = data, x = 'read length', y = 'back matches', hue='reference', fill = True)
+    sns.scatterplot(data = data, x = 'read length', y = 'back matches', hue='reference', alpha = 0.6)
     plt.savefig(outfilebasename + '_readlength_vs_numbackBCmatches.pdf')
     plt.savefig(outfilebasename + '_readlength_vs_numbackBCmatches.svg')
     plt.cla()
     plt.close
 
-    sns.set_theme()
-    sns.histplot(data = data, x = 'first reference position mapped', hue='reference', log_scale=(False, True))
+    g = sns.histplot(data = data, x = 'first reference position mapped', hue='reference')
+    g.set_yscale('log')
     plt.savefig(outfilebasename + '_firstmappedpos.pdf')
     plt.savefig(outfilebasename + '_firstmappedpos.svg')
     plt.cla()
     plt.close
 
-    sns.set_theme()
-    sns.histplot(data = data, x = 'last reference position mapped', hue='reference', log_scale=(False, True))
+    g = sns.histplot(data = data, x = 'last reference position mapped', hue='reference')
+    g.set_yscale('log')
     plt.savefig(outfilebasename + '_lastmappedpos.pdf')
     plt.savefig(outfilebasename + '_lastmappedpos.svg')
     plt.cla()
@@ -359,6 +375,13 @@ def main() -> None:
 
     plotCoverage(mod_coverage, can_coverage, os.path.splitext(outfile)[0] + '_coverage.png', frontBCInterval, backBCInterval)
     plotRest(data, os.path.splitext(outfile)[0])
+
+    barcodeAreas = data[['readid', 'queryFBarcodeStart', 'queryFBarcodeEnd', 'queryBBarcodeStart', 'queryBBarcodeEnd']]
+    print(barcodeAreas.head())
+    barcodeAreas.dropna(inplace=True, thresh=2)
+    aggregation_functions = {'queryFBarcodeStart': 'min', 'queryFBarcodeEnd': 'max', 'queryBBarcodeStart': 'min', 'queryBBarcodeEnd': 'max'}
+    barcodeAreas = barcodeAreas.groupby(barcodeAreas['readid']).aggregate(aggregation_functions)
+    barcodeAreas.to_csv(os.path.splitext(outfile)[0] + '_queryBarcodeArea.csv')
 
 if __name__ == '__main__':
     main()
