@@ -59,7 +59,7 @@ def main() -> None:
     aligner.internal_gap_score = -1
     aligner.mismatch = -1
 
-    counts = {args.label1 : 0, args.label2 : 0, "both" : 0, "sense" : 0, "antisense" : 0, "polyAreads" : 0}
+    counts = {args.label1 : 0, args.label2 : 0, "both" : 0, "sense" : 0, "antisense" : 0, "polyAreads" : 0, "total" : 0}
     # [[forbc1_score, forbc1_matches], ...]
     senseScores = np.zeros((4, 2), dtype=int)
     antisenseScores = np.zeros((4, 2), dtype=int)
@@ -133,6 +133,7 @@ def main() -> None:
 
         bc1_pass = forbc1_pass or revbc1_pass
         bc2_pass = forbc2_pass or revbc2_pass
+        counts["total"] += 1
 
         if bc1_pass or bc2_pass:
             if sense:
@@ -163,6 +164,9 @@ def main() -> None:
 
     print("Done")
     print(counts)
+    print("Ratios:")
+    for key in counts:
+        print(key, counts[key]/counts["total"], end='\t')
 
 if __name__ == '__main__':
     main()
